@@ -1,4 +1,3 @@
-
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -12,55 +11,74 @@ const io = new Server(server, {
   cors: { origin: "*" }
 });
 
-let players = {};
-let phase = "join";
-let allQuestions = [];
-let currentQuiz = [];
+const rooms = {};
 
 io.on("connection", (socket) => {
-  socket.on("join", (name) => {
-    players[socket.id] = { name, score: 0, questions: [] };
-    io.emit("players", Object.values(players).map((p) => p.name));
-  });
+  let currentRoom = "";
 
-  socket.on("submitQuestion", (question) => {
-    if (players[socket.id]) {
-      players[socket.id].questions.push(question);
+  socket.on("join", ({ name, room }) => {
+    currentRoom = room;
+    socket.join(room);
+    if (!rooms[room]) {
+      rooms[room] = { players: {}, questions: [], timerStarted: false };
+    }
+    rooms[room].players[socket.id] = { name, score: 0, question: null };
+    io.to(room).emit("players", Object.values(rooms[room].players).map(p => p.name));
+
+    if (!rooms[room].timerStarted && Object.keys(rooms[room].players).length >= 2) {
+      rooms[room].timerStarted = true;
+      let countdown = 180; // 3 minuten
+      const timer = setInterval(() => {
+        countdown--;
+        io.to(room).emit("countdown", countdown);
+        if (countdown <= 0) {
+          clearInterval(timer);
+          startQuiz(room);
+        }
+      }, 1000);
     }
   });
 
-  socket.on("startQuiz", () => {
-    if (phase === "join" || phase === "questionInput") {
-      allQuestions = Object.values(players).flatMap((p) => p.questions);
-      currentQuiz = shuffle(allQuestions).slice(0, 10);
-      io.emit("startQuiz", currentQuiz);
-      phase = "quiz";
+  socket.on("submitQuestion", (question) => {
+    if (rooms[currentRoom]) {
+      question.author = rooms[currentRoom].players[socket.id].name;
+      rooms[currentRoom].questions.push(question);
+      rooms[currentRoom].players[socket.id].question = question;
     }
   });
 
   socket.on("answer", ({ questionIndex, correct }) => {
-    if (correct && players[socket.id]) {
-      players[socket.id].score++;
-    }
-  });
-
-  socket.on("endQuiz", () => {
-    const results = Object.values(players)
-      .map((p) => ({ name: p.name, score: p.score }))
+    if (correct) rooms[currentRoom].players[socket.id].score++;
+    const results = Object.values(rooms[currentRoom].players)
+      .map(p => ({ name: p.name, score: p.score }))
       .sort((a, b) => b.score - a.score);
-    io.emit("scoreboard", results);
-    phase = "scoreboard";
+    io.to(currentRoom).emit("scoreboard", results);
   });
 
   socket.on("disconnect", () => {
-    delete players[socket.id];
-    io.emit("players", Object.values(players).map((p) => p.name));
+    if (rooms[currentRoom]) {
+      delete rooms[currentRoom].players[socket.id];
+      io.to(currentRoom).emit("players", Object.values(rooms[currentRoom].players).map(p => p.name));
+    }
   });
 });
+
+function startQuiz(room) {
+  const roomData = rooms[room];
+  if (!roomData) return;
+
+  const validPlayers = Object.values(roomData.players).filter(p => p.question);
+  if (validPlayers.length === 0) return;
+
+  let questions = roomData.questions;
+  questions = shuffle(questions).slice(0, Math.ceil(questions.length / 2));
+
+  io.to(room).emit("startQuiz", questions);
+}
 
 function shuffle(array) {
   return array.sort(() => Math.random() - 0.5);
 }
 
 const PORT = process.env.PORT || 10000;
-server.listen(PORT, () => console.log(`✅ Server draait op poort ${PORT}`));
+server.listen(PORT, () => console.log(`✅ Server actief op poort ${PORT}`));
